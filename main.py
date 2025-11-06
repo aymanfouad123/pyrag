@@ -42,10 +42,34 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     ingested = await ctx.step.run("upsert", upsert)
     
     return ingested
+
+@inngest_client.create_function(fn_id="RAG Query", trigger=inngest.TriggerEvent(event="rag/query"))
+async def rag_query(ctx: inngest.Context):
+    def embed_and_search(question: str, top_k: int = 5):
+        query_vector = embed_chunks([question])[0]
+        query_result = QdrantStorage().search(query_vector, top_k)
+        return RAGSearchResult(contexts=query_result["context"], sources=query_result["sources"])
+
+    question = ctx.event.data["question"]
+    top_k = ctx.event.data.get("top_k", 5)
+    query_result = await ctx.step.run("embed-and-search", lambda: embed_and_search(question, top_k), output_type=RAGSearchResult)
+
+    context_block = "\n\n".join(query_result.contexts)
+    user_content = (
+    "You are a helpful assistant that can answer questions about the following context:"
+    f"{context_block}"
+    f"Question: {question}"
+    "Answer concisely using the context provided."
+    )
+    
+    adapter = ai.openai.Adapter(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
+    res = await ctx.step.ai.infer("llm-answer", adapter, body ={"max_tokens": 1024, "temperature": 0.2, "messages": [{"role": "system", "content": "You are a helpful assistant that can answer questions about the following context:"}, {"role": "user", "content": user_content}]})
+    answer = res.choices[0].message.content.strip()
+    return RAGQueryResult(answer=answer, sources=query_result.sources, num_contexts=len(query_result.contexts))
     
 app = FastAPI()
 
-inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf])
+inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query])
 
 @app.get("/")
 def read_root():
