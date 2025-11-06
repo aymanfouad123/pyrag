@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 import uuid
 import os
 import datetime
+
+from openai import OpenAI
 from data_loader import load_data, embed_chunks
 from vector_db import QdrantStorage
 from models import RAGUpsertRequest, RAGSearchResult, RAGQueryResult, RAGChunkAndSource
@@ -45,32 +47,75 @@ async def rag_ingest_pdf(ctx: inngest.Context):
 
 @inngest_client.create_function(fn_id="RAG Query", trigger=inngest.TriggerEvent(event="rag/query"))
 async def rag_query(ctx: inngest.Context):
-    def embed_and_search(question: str, top_k: int = 5):
+    
+    # Step 1: Embed and search
+    def embed_and_search():
+        question = ctx.event.data["question"]
+        top_k = ctx.event.data.get("top_k", 5)
         query_vector = embed_chunks([question])[0]
         query_result = QdrantStorage().search(query_vector, top_k)
-        return RAGSearchResult(contexts=query_result["context"], sources=query_result["sources"])
-
-    question = ctx.event.data["question"]
-    top_k = ctx.event.data.get("top_k", 5)
-    query_result = await ctx.step.run("embed-and-search", lambda: embed_and_search(question, top_k), output_type=RAGSearchResult)
-
-    context_block = "\n\n".join(query_result.contexts)
-    user_content = (
-    "You are a helpful assistant that can answer questions about the following context:"
-    f"{context_block}"
-    f"Question: {question}"
-    "Answer concisely using the context provided."
-    )
+        return {
+            "contexts": query_result["context"],
+            "sources": list(query_result["sources"])
+        }
     
-    adapter = ai.openai.Adapter(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
-    res = await ctx.step.ai.infer("llm-answer", adapter, body ={"max_tokens": 1024, "temperature": 0.2, "messages": [{"role": "system", "content": "You are a helpful assistant that can answer questions about the following context:"}, {"role": "user", "content": user_content}]})
-    answer = res.choices[0].message.content.strip()
-    return RAGQueryResult(answer=answer, sources=query_result.sources, num_contexts=len(query_result.contexts))
+    # Step 2: Generate answer
+    def generate_answer():
+        contexts = search_result["contexts"]
+        sources = search_result["sources"]
+        question = ctx.event.data["question"]
+        
+        context_block = "\n\n".join(contexts)
+        user_content = (
+            "You are a helpful assistant that can answer questions about the following context:\n\n"
+            f"{context_block}\n\n"
+            f"Question: {question}\n\n"
+            "Answer concisely using the context provided."
+        )
+        
+        return {
+            "context_block": context_block,
+            "user_content": user_content,
+            "sources": sources,
+            "num_contexts": len(contexts)
+        }
+    
+    search_result = await ctx.step.run("embed-and-search", embed_and_search)
+    llm_input = await ctx.step.run("prepare-llm-input", generate_answer)
+    
+    # Step 3: Call LLM
+    def call_llm():
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a helpful assistant that answers questions based on provided context."
+                },
+                {
+                    "role": "user", 
+                    "content": llm_input["user_content"]
+                }
+            ],
+            max_tokens=1024,
+            temperature=0.2
+        )
+        
+        return {
+            "answer": response.choices[0].message.content.strip()
+        }
+
+    llm_result = await ctx.step.run("llm-answer", call_llm)
+    answer = llm_result["answer"]
+        
+    return {
+        "answer": answer,
+        "sources": llm_input["sources"],
+        "num_contexts": llm_input["num_contexts"]
+    }
     
 app = FastAPI()
 
 inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query])
-
-@app.get("/")
-def read_root():
-    return {"message": "Hello, World!"}
