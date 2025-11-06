@@ -13,11 +13,10 @@ EMBEDDING_DIM = 3072
 splitter = SentenceSplitter(chunk_size=1000, chunk_overlap=200)
 
 def load_data(file_path: str):
-    reader = PDFReader.load_data(file_path)
-    texts = [d.text for d in reader if getattr(d, "text", None)]
-    chunks = []
-    for t in texts:
-        chunks.extend(splitter.split_text(t))
+    reader = PDFReader()
+    documents = reader.load_data(file=file_path)
+    nodes = splitter.get_nodes_from_documents(documents)
+    chunks = [node.get_content() for node in nodes]
     return chunks
 
 def embed_chunks(chunks: list[str]) -> list[list[float]]:
