@@ -45,7 +45,7 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     
     return ingested
 
-@inngest_client.create_function(fn_id="RAG Query", trigger=inngest.TriggerEvent(event="rag/query"))
+@inngest_client.create_function(fn_id="RAG Query", trigger=inngest.TriggerEvent(event="rag/query_pdf_ai"))
 async def rag_query(ctx: inngest.Context):
     
     # Step 1: Embed and search
